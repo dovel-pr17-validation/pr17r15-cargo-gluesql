@@ -1,0 +1,20 @@
+[package]
+name = "gluesql-shared-memory-storage"
+version.workspace = true
+edition.workspace = true
+description.workspace = true
+license.workspace = true
+repository.workspace = true
+documentation.workspace = true
+
+[dependencies]
+gluesql-core.workspace = true
+gluesql_memory_storage.workspace = true
+
+serde = { version = "1", features = ["derive"] }
+
+[dev-dependencies]
+test-suite.workspace = true
+
+[lints]
+workspace = true

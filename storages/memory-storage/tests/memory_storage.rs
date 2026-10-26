@@ -1,0 +1,201 @@
+use {gluesql_core::prelude::Glue, gluesql_memory_storage::MemoryStorage, test_suite::*};
+
+struct MemoryTester {
+    glue: Glue<MemoryStorage>,
+}
+
+impl Tester<MemoryStorage> for MemoryTester {
+    fn new(_: &str) -> Self {
+        let storage = MemoryStorage::default();
+        let glue = Glue::new(storage);
+
+        MemoryTester { glue }
+    }
+
+    fn get_glue(&mut self) -> &mut Glue<MemoryStorage> {
+        &mut self.glue
+    }
+}
+
+generate_store_tests!(test, MemoryTester);
+
+generate_alter_table_tests!(test, MemoryTester);
+
+generate_metadata_table_tests!(test, MemoryTester);
+
+generate_custom_function_tests!(test, MemoryTester);
+
+macro_rules! exec {
+    ($glue: ident $sql: literal) => {
+        $glue.execute($sql).unwrap();
+    };
+}
+
+macro_rules! test {
+    ($glue: ident $sql: expr, $result: expr) => {
+        assert_eq!($glue.execute($sql), $result);
+    };
+}
+
+#[test]
+fn memory_storage_index() {
+    use gluesql_core::{
+        prelude::{Error, Glue},
+        store::{Index, Store},
+    };
+
+    let storage = MemoryStorage::default();
+
+    assert_eq!(
+        Store::scan_data(&storage, "Idx")
+            .unwrap()
+            .collect::<gluesql_core::prelude::Result<Vec<_>>>()
+            .as_ref()
+            .map(Vec::len),
+        Ok(0),
+    );
+
+    assert_eq!(
+        storage
+            .scan_indexed_data("Idx", "hello", None, None)
+            .map(|_| ()),
+        Err(Error::StorageMsg(
+            "[MemoryStorage] index is not supported".to_owned()
+        ))
+    );
+
+    let mut glue = Glue::new(storage);
+
+    exec!(glue "CREATE TABLE Idx (id INTEGER);");
+    test!(
+        glue "CREATE INDEX idx_id ON Idx (id);",
+        Err(Error::StorageMsg("[MemoryStorage] index is not supported".to_owned()))
+    );
+    test!(
+        glue "DROP INDEX Idx.idx_id;",
+        Err(Error::StorageMsg("[MemoryStorage] index is not supported".to_owned()))
+    );
+}
+
+#[test]
+fn memory_storage_transaction() {
+    use gluesql_core::prelude::{Error, Glue, Payload};
+
+    let storage = MemoryStorage::default();
+    let mut glue = Glue::new(storage);
+
+    exec!(glue "CREATE TABLE TxTest (id INTEGER);");
+    test!(glue "BEGIN", Err(Error::StorageMsg("[MemoryStorage] transaction is not supported".to_owned())));
+    test!(glue "COMMIT", Ok(vec![Payload::Commit]));
+    test!(glue "ROLLBACK", Ok(vec![Payload::Rollback]));
+}
+
+#[test]
+fn schemaless_update_conflict_on_non_map_row() {
+    use gluesql_core::{
+        data::Value,
+        error::UpdateError,
+        prelude::{Error, Glue},
+        store::StoreMut,
+    };
+
+    let storage = MemoryStorage::default();
+    let mut glue = Glue::new(storage);
+
+    exec!(glue "CREATE TABLE Logs;");
+    glue.storage
+        .append_data("Logs", vec![vec![Value::I64(1)]])
+        .unwrap();
+
+    test!(
+        glue "UPDATE Logs SET id = 2;",
+        Err(Error::Update(UpdateError::ConflictOnNonMapSchemalessRow))
+    );
+}
+
+#[test]
+fn memory_storage_dynamic_metadata() {
+    use gluesql_core::{data::Value, prelude::Payload};
+
+    let storage = MemoryStorage::default();
+    let mut glue = Glue::new(storage);
+
+    exec!(glue "CREATE TABLE Restaurant (id INTEGER);");
+
+    let metadata = glue.storage.metadata.get_mut("Restaurant").unwrap();
+    metadata.insert("FOOD".to_owned(), Value::Str("Pizza".to_owned()));
+    let created = metadata.get("CREATED").unwrap().clone();
+
+    test!(
+        glue "SELECT * FROM GLUE_OBJECTS;",
+        Ok(vec![Payload::Select {
+            labels: vec![
+                "OBJECT_NAME".to_owned(),
+                "OBJECT_TYPE".to_owned(),
+                "CREATED".to_owned(),
+                "FOOD".to_owned(),
+            ],
+            rows: vec![vec![
+                Value::Str("Restaurant".to_owned()),
+                Value::Str("TABLE".to_owned()),
+                created,
+                Value::Str("Pizza".to_owned()),
+            ]],
+        }])
+    );
+}
+
+#[test]
+fn memory_storage_dynamic_metadata_union() {
+    use gluesql_core::{data::Value, prelude::Payload};
+
+    let storage = MemoryStorage::default();
+    let mut glue = Glue::new(storage);
+
+    exec!(glue "CREATE TABLE Cafe (id INTEGER);");
+    exec!(glue "CREATE TABLE Restaurant (id INTEGER);");
+
+    glue.storage
+        .metadata
+        .get_mut("Cafe")
+        .unwrap()
+        .insert("DRINK".to_owned(), Value::Str("Coffee".to_owned()));
+
+    glue.storage
+        .metadata
+        .get_mut("Restaurant")
+        .unwrap()
+        .insert("FOOD".to_owned(), Value::Str("Pizza".to_owned()));
+
+    let cafe_created = glue.storage.metadata["Cafe"]["CREATED"].clone();
+    let restaurant_created = glue.storage.metadata["Restaurant"]["CREATED"].clone();
+
+    test!(
+        glue "SELECT * FROM GLUE_OBJECTS;",
+        Ok(vec![Payload::Select {
+            labels: vec![
+                "OBJECT_NAME".to_owned(),
+                "OBJECT_TYPE".to_owned(),
+                "CREATED".to_owned(),
+                "DRINK".to_owned(),
+                "FOOD".to_owned(),
+            ],
+            rows: vec![
+                vec![
+                    Value::Str("Cafe".to_owned()),
+                    Value::Str("TABLE".to_owned()),
+                    cafe_created,
+                    Value::Str("Coffee".to_owned()),
+                    Value::Null,
+                ],
+                vec![
+                    Value::Str("Restaurant".to_owned()),
+                    Value::Str("TABLE".to_owned()),
+                    restaurant_created,
+                    Value::Null,
+                    Value::Str("Pizza".to_owned()),
+                ],
+            ],
+        }])
+    );
+}

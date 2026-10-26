@@ -1,0 +1,54 @@
+use {
+    super::CompositeStorage,
+    gluesql_core::{
+        data::{Key, Schema, Value},
+        error::{Error, Result},
+        store::StoreMut,
+    },
+};
+
+impl StoreMut for CompositeStorage {
+    fn insert_schema(&mut self, schema: &Schema) -> Result<()> {
+        let storage = schema
+            .engine
+            .as_ref()
+            .or(self.default_engine.as_ref())
+            .and_then(|engine| self.storages.get_mut(engine));
+
+        match (storage, schema.engine.is_some()) {
+            (Some(storage), true) => storage.insert_schema(schema),
+            (Some(storage), false) => {
+                let schema = Schema {
+                    engine: self.default_engine.clone(),
+                    ..schema.clone()
+                };
+
+                storage.insert_schema(&schema)
+            }
+            (None, _) => Err(Error::StorageMsg(format!(
+                "storage not found for table: {}",
+                schema.table_name
+            ))),
+        }
+    }
+
+    fn delete_schema(&mut self, table_name: &str) -> Result<()> {
+        self.fetch_storage_mut(table_name)?
+            .delete_schema(table_name)
+    }
+
+    fn append_data(&mut self, table_name: &str, rows: Vec<Vec<Value>>) -> Result<()> {
+        self.fetch_storage_mut(table_name)?
+            .append_data(table_name, rows)
+    }
+
+    fn insert_data(&mut self, table_name: &str, rows: Vec<(Key, Vec<Value>)>) -> Result<()> {
+        self.fetch_storage_mut(table_name)?
+            .insert_data(table_name, rows)
+    }
+
+    fn delete_data(&mut self, table_name: &str, keys: Vec<Key>) -> Result<()> {
+        self.fetch_storage_mut(table_name)?
+            .delete_data(table_name, keys)
+    }
+}

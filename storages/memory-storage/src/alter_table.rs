@@ -1,0 +1,128 @@
+use {
+    super::MemoryStorage,
+    gluesql_core::{
+        ast::ColumnDef,
+        data::Value,
+        error::{AlterTableError, Result},
+        store::AlterTable,
+    },
+};
+
+impl AlterTable for MemoryStorage {
+    fn rename_schema(&mut self, table_name: &str, new_table_name: &str) -> Result<()> {
+        let mut item = self
+            .items
+            .remove(table_name)
+            .ok_or_else(|| AlterTableError::TableNotFound(table_name.to_owned()))?;
+
+        new_table_name.clone_into(&mut item.schema.table_name);
+        self.items.insert(new_table_name.to_owned(), item);
+
+        Ok(())
+    }
+
+    fn rename_column(
+        &mut self,
+        table_name: &str,
+        old_column_name: &str,
+        new_column_name: &str,
+    ) -> Result<()> {
+        let item = self
+            .items
+            .get_mut(table_name)
+            .ok_or_else(|| AlterTableError::TableNotFound(table_name.to_owned()))?;
+
+        let column_defs = item
+            .schema
+            .column_defs
+            .as_mut()
+            .ok_or_else(|| AlterTableError::SchemalessTableFound(table_name.to_owned()))?;
+
+        if column_defs
+            .iter()
+            .any(|ColumnDef { name, .. }| name == new_column_name)
+        {
+            return Err(AlterTableError::AlreadyExistingColumn(new_column_name.to_owned()).into());
+        }
+
+        let column_def = column_defs
+            .iter_mut()
+            .find(|column_def| column_def.name == old_column_name)
+            .ok_or(AlterTableError::RenamingColumnNotFound)?;
+
+        new_column_name.clone_into(&mut column_def.name);
+
+        Ok(())
+    }
+
+    fn add_column(
+        &mut self,
+        table_name: &str,
+        column_def: &ColumnDef,
+        default_value: Value,
+    ) -> Result<()> {
+        let item = self
+            .items
+            .get_mut(table_name)
+            .ok_or_else(|| AlterTableError::TableNotFound(table_name.to_owned()))?;
+
+        let column_defs = item
+            .schema
+            .column_defs
+            .as_mut()
+            .ok_or_else(|| AlterTableError::SchemalessTableFound(table_name.to_owned()))?;
+
+        if column_defs
+            .iter()
+            .any(|ColumnDef { name, .. }| name == &column_def.name)
+        {
+            let adding_column = column_def.name.clone();
+
+            return Err(AlterTableError::AlreadyExistingColumn(adding_column).into());
+        }
+
+        for row in item.rows.values_mut() {
+            row.push(default_value.clone());
+        }
+
+        column_defs.push(column_def.clone());
+
+        Ok(())
+    }
+
+    fn drop_column(&mut self, table_name: &str, column_name: &str, if_exists: bool) -> Result<()> {
+        let item = self
+            .items
+            .get_mut(table_name)
+            .ok_or_else(|| AlterTableError::TableNotFound(table_name.to_owned()))?;
+
+        let column_defs = item
+            .schema
+            .column_defs
+            .as_mut()
+            .ok_or_else(|| AlterTableError::SchemalessTableFound(table_name.to_owned()))?;
+
+        let column_index = column_defs
+            .iter()
+            .position(|column_def| column_def.name == column_name);
+
+        match column_index {
+            Some(column_index) => {
+                column_defs.remove(column_index);
+
+                for row in item.rows.values_mut() {
+                    if row.len() <= column_index {
+                        continue;
+                    }
+                    row.remove(column_index);
+                }
+            }
+            None if if_exists => {}
+            None => {
+                return Err(AlterTableError::DroppingColumnNotFound(column_name.to_owned()).into());
+            }
+        }
+
+        Ok(())
+    }
+}

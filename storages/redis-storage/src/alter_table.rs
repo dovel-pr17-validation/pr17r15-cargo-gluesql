@@ -1,0 +1,221 @@
+use {
+    super::{RedisStorage, mutex::MutexExt},
+    gluesql_core::{
+        ast::ColumnDef,
+        data::Value,
+        error::{AlterTableError, Error, Result},
+        store::{AlterTable, Store},
+    },
+    redis::Commands,
+};
+
+impl AlterTable for RedisStorage {
+    fn rename_schema(&mut self, table_name: &str, new_table_name: &str) -> Result<()> {
+        if let Some(mut schema) = self.fetch_schema(table_name)? {
+            // Which should be done first? deleting or storing?
+            self.redis_delete_schema(table_name)?;
+
+            new_table_name.clone_into(&mut schema.table_name);
+            self.redis_store_schema(&schema)?;
+
+            let redis_key_iter: Vec<String> = self.redis_execute_scan(table_name)?;
+
+            for redis_key in redis_key_iter {
+                if let Some(value) = self.redis_execute_get(&redis_key)? {
+                    let key = Self::redis_parse_key(&redis_key)?;
+                    let new_key = Self::redis_generate_key(&self.namespace, new_table_name, &key)?;
+
+                    self.redis_execute_set(&new_key, &value)?;
+                    self.redis_execute_del(&redis_key)?;
+                }
+            }
+        } else {
+            return Err(AlterTableError::TableNotFound(table_name.to_owned()).into());
+        }
+
+        Ok(())
+    }
+
+    fn rename_column(
+        &mut self,
+        table_name: &str,
+        old_column_name: &str,
+        new_column_name: &str,
+    ) -> Result<()> {
+        if let Some(mut schema) = self.fetch_schema(table_name)? {
+            let column_defs = schema
+                .column_defs
+                .as_mut()
+                .ok_or_else(|| AlterTableError::SchemalessTableFound(table_name.to_owned()))?;
+
+            if column_defs
+                .iter()
+                .any(|ColumnDef { name, .. }| name == new_column_name)
+            {
+                return Err(
+                    AlterTableError::AlreadyExistingColumn(new_column_name.to_owned()).into(),
+                );
+            }
+
+            let column_def = column_defs
+                .iter_mut()
+                .find(|column_def| column_def.name == old_column_name)
+                .ok_or(AlterTableError::RenamingColumnNotFound)?;
+
+            new_column_name.clone_into(&mut column_def.name);
+
+            self.redis_delete_schema(table_name)?;
+            self.redis_store_schema(&schema)?;
+        } else {
+            return Err(AlterTableError::TableNotFound(table_name.to_owned()).into());
+        }
+
+        Ok(())
+    }
+
+    fn add_column(
+        &mut self,
+        table_name: &str,
+        column_def: &ColumnDef,
+        default_value: Value,
+    ) -> Result<()> {
+        if let Some(mut schema) = self.fetch_schema(table_name)? {
+            let column_defs = schema
+                .column_defs
+                .as_mut()
+                .ok_or_else(|| AlterTableError::SchemalessTableFound(table_name.to_owned()))?;
+
+            if column_defs
+                .iter()
+                .any(|ColumnDef { name, .. }| name == &column_def.name)
+            {
+                let adding_column = column_def.name.clone();
+
+                return Err(AlterTableError::AlreadyExistingColumn(adding_column).into());
+            }
+
+            let new_value_of_new_column = default_value;
+
+            // NOTE: It cannot call self.redis_execute_scan/get/set methods directly.
+            // column_defs has a reference to item and the item has a reference to self.
+            // Therefore it cannot call self.redis_execute_scan method because
+            // it needs to use the mutable reference of self.
+            // Otherwise, it will cause a mutable reference conflict.
+            let scan_key = Self::redis_generate_scankey(&self.namespace, table_name);
+            let key_iter: Vec<String> = {
+                let mut conn = self.conn.lock_err()?;
+                conn.scan_match(&scan_key)
+                    .map(Iterator::collect::<Vec<String>>)
+                    .map_err(|_| {
+                        Error::StorageMsg(format!(
+                            "[RedisStorage] failed to execute SCAN: key={scan_key}"
+                        ))
+                    })?
+            };
+
+            for key in key_iter {
+                let value = {
+                    let mut conn = self.conn.lock_err()?;
+                    redis::cmd("GET")
+                        .arg(&key)
+                        .query::<String>(&mut *conn)
+                        .map_err(|_| {
+                            Error::StorageMsg(format!(
+                                "[RedisStorage] failed to execute GET: key={key}"
+                            ))
+                        })?
+                };
+
+                let mut row: Vec<Value> = serde_json::from_str(&value).map_err(|e| {
+                    Error::StorageMsg(format!(
+                        "[RedisStorage] failed to deserialize value={value} error={e}"
+                    ))
+                })?;
+                row.push(new_value_of_new_column.clone());
+
+                let new_value = serde_json::to_string(&row).map_err(|e| {
+                    Error::StorageMsg(format!(
+                        "[RedisStorage] failed to serialize row={row:?} error={e}"
+                    ))
+                })?;
+                let _: () = {
+                    let mut conn = self.conn.lock_err()?;
+                    redis::cmd("SET")
+                        .arg(&key)
+                        .arg(new_value)
+                        .query::<()>(&mut *conn)
+                        .map_err(|_| {
+                            Error::StorageMsg(format!(
+                                "[RedisStorage] add_column: failed to execute SET for row={row:?}"
+                            ))
+                        })?;
+                };
+            }
+
+            column_defs.push(column_def.clone());
+            self.redis_delete_schema(table_name)?; // No problem yet, finally it's ok to delete the old schema
+            self.redis_store_schema(&schema)?;
+        } else {
+            return Err(AlterTableError::TableNotFound(table_name.to_owned()).into());
+        }
+
+        Ok(())
+    }
+
+    fn drop_column(&mut self, table_name: &str, column_name: &str, if_exists: bool) -> Result<()> {
+        if let Some(mut schema) = self.fetch_schema(table_name)? {
+            let column_defs = schema
+                .column_defs
+                .as_mut()
+                .ok_or_else(|| AlterTableError::SchemalessTableFound(table_name.to_owned()))?;
+
+            let column_index = column_defs
+                .iter()
+                .position(|column_def| column_def.name == column_name);
+
+            match column_index {
+                Some(column_index) => {
+                    column_defs.remove(column_index);
+
+                    let key_iter = self.redis_execute_scan(table_name)?;
+                    for key in key_iter {
+                        if let Some(value) = self.redis_execute_get(&key)? {
+                            let mut row: Vec<Value> = serde_json::from_str(&value).map_err(|e| {
+                                Error::StorageMsg(format!(
+                                    "[RedisStorage] failed to deserialize value={value} error={e}"
+                                ))
+                            })?;
+                            if column_index >= row.len() {
+                                return Err(Error::StorageMsg(format!(
+                                    "[RedisStorage] conflict - drop_column failed: row too short for column index row_len={} column_index={column_index}",
+                                    row.len(),
+                                )));
+                            }
+                            row.remove(column_index);
+
+                            let new_value = serde_json::to_string(&row).map_err(|e| {
+                                Error::StorageMsg(format!(
+                                    "[RedisStorage] failed to serialize row={row:?} error={e}"
+                                ))
+                            })?;
+                            self.redis_execute_set(&key, &new_value)?;
+                        }
+                    }
+                }
+                None if if_exists => {}
+                None => {
+                    return Err(
+                        AlterTableError::DroppingColumnNotFound(column_name.to_owned()).into(),
+                    );
+                }
+            }
+
+            self.redis_delete_schema(table_name)?; // No problem yet, finally it's ok to delete the old schema
+            self.redis_store_schema(&schema)?;
+        } else {
+            return Err(AlterTableError::TableNotFound(table_name.to_owned()).into());
+        }
+
+        Ok(())
+    }
+}

@@ -1,0 +1,39 @@
+name: Publish Rust
+
+on:
+  workflow_dispatch:
+    inputs:
+      # Latest commit to include with the release. If omitted, use the latest commit on the main branch.
+      sha:
+        description: Commit SHA
+        type: string
+      dry_run:
+        description: Dry run
+        type: boolean
+        default: true
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  publish_to_crates:
+    name: to crates.io
+    runs-on: ubuntu-latest
+    env:
+      SHA: ${{ github.event.inputs.sha }}
+      DRY_RUN: ${{ github.event.inputs.dry_run || 'true' }}
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          ref: ${{ env.SHA }}
+      - uses: Swatinem/rust-cache@v2
+      - run: |
+          publish_args=(
+            --workspace
+          )
+
+          if [ "$DRY_RUN" = "true" ]; then
+            cargo publish "${publish_args[@]}" --dry-run
+          else
+            cargo publish "${publish_args[@]}" --token ${{ secrets.CRATES }}
+          fi

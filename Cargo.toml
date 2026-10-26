@@ -1,0 +1,59 @@
+[workspace]
+resolver = "2"
+members = [
+  "cli",
+  "core",
+  "macros",
+  "pkg/rust",
+  "storages/*",
+  "test-suite",
+]
+default-members = [
+  "cli",
+  "core",
+  "macros",
+  "pkg/rust",
+  "storages/*",
+  "test-suite",
+]
+
+[workspace.package]
+version = "0.20.0"
+edition = "2024"
+description = "GlueSQL - Open source SQL database engine fully written in Rust with pure functional execution layer, easily swappable storage and web assembly support!"
+license = "Apache-2.0"
+repository = "https://github.com/gluesql/gluesql"
+documentation = "https://docs.rs/gluesql/"
+
+[workspace.dependencies]
+gluesql-core = { path = "./core", version = "0.20.0" }
+
+cli = { package = "gluesql-cli", path = "./cli", version = "0.20.0" }
+test-suite = { package = "gluesql-test-suite", path = "./test-suite", version = "0.20.0" }
+gluesql_memory_storage = { path = "./storages/memory-storage", version = "0.20.0" }
+gluesql-shared-memory-storage = { path = "./storages/shared-memory-storage", version = "0.20.0" }
+gluesql_sled_storage = { path = "./storages/sled-storage", version = "0.20.0" }
+gluesql-redb-storage = { path = "./storages/redb-storage", version = "0.20.0" }
+gluesql-json-storage = { path = "./storages/json-storage", version = "0.20.0" }
+gluesql-csv-storage = { path = "./storages/csv-storage", version = "0.20.0" }
+gluesql-composite-storage = { path = "./storages/composite-storage", version = "0.20.0" }
+gluesql-redis-storage = { path = "./storages/redis-storage", version = "0.20.0" }
+gluesql-mongo-storage = { path = "./storages/mongo-storage", version = "0.20.0" }
+gluesql-parquet-storage = { path = "./storages/parquet-storage", version = "0.20.0" }
+gluesql-file-storage = { path = "./storages/file-storage", version = "0.20.0" }
+gluesql-git-storage = { path = "./storages/git-storage", version = "0.20.0" }
+
+[workspace.lints.clippy]
+pedantic = { level = "deny", priority = -1 }
+too_many_lines = "allow"  # It's a clippy::pedantic rule, but it should still be allowed for cohesion.
+cast_possible_truncation = "allow"
+cast_possible_wrap = "allow"
+cast_precision_loss = "allow"
+cast_sign_loss = "allow"
+missing_errors_doc = "allow"
+missing_panics_doc = "allow"
+must_use_candidate = "allow"
+struct_field_names = "allow"
+float_cmp = "allow"
+enum_glob_use = "allow"
+wildcard_imports = "allow"
