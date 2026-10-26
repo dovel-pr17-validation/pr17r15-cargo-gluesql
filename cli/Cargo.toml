@@ -23,7 +23,7 @@ rustyline-derive = "0.6"
 tabled = "0.8"
 thiserror = "1.0"
 edit = "0.1.4"
-anyhow = "1.0"
+anyhow = "1.0.104"
 strum_macros = "0.25"
 
 [lints]
